@@ -241,12 +241,10 @@
         <h3>실시간 응답:</h3>
         <div id="responseArea" class="response-area empty">여기에 실시간 응답이 표시됩니다...</div>
 
-        <!-- 시스템 프롬프트 영역 임시 주석 처리
         <div class="input-group">
-            <label for="systemPromptInput">시스템 프롬프트 (선택사항):</label>
-            <textarea id="systemPromptInput" placeholder="시스템 프롬프트를 입력하세요"></textarea>
+            <label for="systemPromptInput">시스템 프롬프트 (서버에서 자동 로드):</label>
+            <textarea id="systemPromptInput" placeholder="연결 시 서버에서 자동으로 로드됩니다..." readonly></textarea>
         </div>
-        -->
 
         <h3>로그:</h3>
         <div id="messages" class="messages"></div>
@@ -300,15 +298,43 @@
             responseAreaEl.textContent = '여기에 실시간 응답이 표시됩니다...';
         }
         
-        connectBtn.addEventListener('click', () => {
+        // 시스템 프롬프트를 서버에서 가져오는 함수
+        async function loadSystemPrompt() {
+            try {
+                addMessage('🔄 시스템 프롬프트를 서버에서 가져오는 중...', 'system');
+                const response = await fetch('https://deep-me-v1.onrender.com/prompts/system');
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const data = await response.json();
+
+                if (data.content) {
+                    systemPromptInput.value = data.content;
+                    addMessage('✅ 시스템 프롬프트 로드 완료', 'system');
+                    addMessage(`📋 프롬프트 SHA256: ${data.sha256?.substring(0, 16)}...`, 'system');
+                    addMessage(`🕒 마지막 업데이트: ${new Date(data.updated_at).toLocaleString('ko-KR')}`, 'system');
+                } else {
+                    addMessage('⚠️ 시스템 프롬프트가 비어있습니다.', 'system');
+                }
+            } catch (error) {
+                addMessage(`❌ 시스템 프롬프트 로드 실패: ${error.message}`, 'error');
+            }
+        }
+
+        connectBtn.addEventListener('click', async () => {
             updateStatus('연결 중...', 'connecting');
             addMessage('WebSocket 연결을 시도합니다... (웹 테스트 모드)', 'system');
+
+            // 먼저 시스템 프롬프트를 가져옵니다
+            await loadSystemPrompt();
 
             try {
                 // 프로덕션 서버 연결 (웹 테스트 모드: 인증 없이 연결)
                 const wsUrl = `wss://deep-me-v1.onrender.com/ws/emotion`;
                 addMessage(`연결 URL: ${wsUrl}`, 'system');
-                
+
                 ws = new WebSocket(wsUrl);
                 
                 ws.onopen = () => {
@@ -407,6 +433,13 @@
                 user_input: message,
                 step_type: 'normal'
             };
+
+            // 시스템 프롬프트가 있으면 포함
+            const systemPrompt = systemPromptInput.value.trim();
+            if (systemPrompt) {
+                payload.system_prompt = systemPrompt;
+                addMessage('📝 시스템 프롬프트 포함하여 전송', 'system');
+            }
 
             addMessage(`송신: ${JSON.stringify(payload, null, 2)}`, 'sent');
 
