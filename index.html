@@ -104,6 +104,21 @@
         .clear-btn:hover {
             background: #545b62;
         }
+
+        .copy-btn {
+            background: #17a2b8;
+            color: white;
+            padding: 8px 16px;
+            font-size: 14px;
+        }
+
+        .copy-btn:hover {
+            background: #138496;
+        }
+
+        .copy-btn:active {
+            background: #0f6674;
+        }
         
         .input-group {
             margin-bottom: 20px;
@@ -231,6 +246,16 @@
             font-size: 13px;
         }
 
+        .response-history-item.user {
+            background: #e3f2fd;
+            border-left: 4px solid #2196f3;
+        }
+
+        .response-history-item.assistant {
+            background: #f3e5f5;
+            border-left: 4px solid #9c27b0;
+        }
+
         .response-history-item:last-child {
             margin-bottom: 0;
         }
@@ -287,7 +312,10 @@
         <h3>실시간 응답:</h3>
         <div id="responseArea" class="response-area empty">여기에 실시간 응답이 표시됩니다...</div>
 
-        <h3>직전 완료 응답:</h3>
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+            <h3 style="margin: 0;">전체 대화 히스토리:</h3>
+            <button id="copyHistoryBtn" class="copy-btn" title="전체 히스토리 복사">📋 전체 복사</button>
+        </div>
         <div id="responseHistory" class="response-history empty">아직 완료된 응답이 없습니다.</div>
 
         <div class="input-group">
@@ -312,6 +340,7 @@
         const sendBtn = document.getElementById('sendBtn');
         const clearBtn = document.getElementById('clearBtn');
         const savePromptBtn = document.getElementById('savePromptBtn');
+        const copyHistoryBtn = document.getElementById('copyHistoryBtn');
         const messagesEl = document.getElementById('messages');
         const responseAreaEl = document.getElementById('responseArea');
         const responseHistoryEl = document.getElementById('responseHistory');
@@ -350,25 +379,29 @@
             responseAreaEl.textContent = '여기에 실시간 응답이 표시됩니다...';
         }
 
-        function addToHistory(responseText) {
+        function addToHistory(text, type = 'assistant') {
             // 히스토리가 비어있으면 empty 클래스 제거
             if (responseHistoryEl.classList.contains('empty')) {
                 responseHistoryEl.classList.remove('empty');
+                responseHistoryEl.innerHTML = '';
             }
 
-            // 기존 내용을 모두 지우고 새로운 응답만 표시 (직전 응답만 유지)
-            responseHistoryEl.innerHTML = '';
-
             const historyItem = document.createElement('div');
-            historyItem.className = 'response-history-item';
+            historyItem.className = `response-history-item ${type}`;
 
             const timestamp = new Date().toLocaleString('ko-KR');
+            const label = type === 'user' ? '👤 사용자' : '🤖 노아';
+
             historyItem.innerHTML = `
-                <span class="timestamp">[${timestamp}]</span>
-                <div class="content">${responseText}</div>
+                <span class="timestamp">[${timestamp}] ${label}</span>
+                <div class="content">${text}</div>
             `;
 
-            responseHistoryEl.appendChild(historyItem);
+            // 새로운 응답을 맨 위에 추가 (최신 응답이 위로)
+            responseHistoryEl.insertBefore(historyItem, responseHistoryEl.firstChild);
+
+            // 최신 응답으로 스크롤
+            responseHistoryEl.scrollTop = 0;
         }
 
         function clearHistory() {
@@ -495,6 +528,11 @@
                             updateResponse(currentResponse, true);
                             addMessage(`✅ 응답 완료!`, 'system');
 
+                            // AI 응답을 히스토리에 추가
+                            if (currentResponse) {
+                                addToHistory(currentResponse, 'assistant');
+                            }
+
                         } else if (data.type === 'error') {
                             addMessage(`❌ 오류: ${data.message}`, 'error');
 
@@ -564,10 +602,8 @@
 
             addMessage(`송신: ${JSON.stringify(payload, null, 2)}`, 'sent');
 
-            // 새 메시지를 보내기 전에 현재 완료된 응답을 히스토리로 이동
-            if (currentResponse && !responseAreaEl.classList.contains('empty')) {
-                addToHistory(currentResponse);
-            }
+            // 사용자 입력을 히스토리에 추가
+            addToHistory(message, 'user');
 
             currentResponse = '';
             clearResponse();
@@ -594,6 +630,43 @@
         });
 
         savePromptBtn.addEventListener('click', saveSystemPrompt);
+
+        // 전체 히스토리 복사 기능
+        copyHistoryBtn.addEventListener('click', async () => {
+            if (responseHistoryEl.classList.contains('empty')) {
+                addMessage('⚠️ 복사할 히스토리가 없습니다.', 'system');
+                return;
+            }
+
+            try {
+                // 모든 히스토리 아이템에서 텍스트를 추출
+                const historyItems = responseHistoryEl.querySelectorAll('.response-history-item');
+                let fullText = '';
+
+                historyItems.forEach((item, index) => {
+                    const timestamp = item.querySelector('.timestamp').textContent;
+                    const content = item.querySelector('.content').textContent;
+                    fullText += `${timestamp}\n${content}\n\n`;
+                });
+
+                // 클립보드에 복사
+                await navigator.clipboard.writeText(fullText.trim());
+
+                // 성공 피드백
+                const originalText = copyHistoryBtn.textContent;
+                copyHistoryBtn.textContent = '✅ 복사 완료!';
+                copyHistoryBtn.style.background = '#28a745';
+
+                setTimeout(() => {
+                    copyHistoryBtn.textContent = originalText;
+                    copyHistoryBtn.style.background = '#17a2b8';
+                }, 2000);
+
+                addMessage('📋 전체 히스토리가 클립보드에 복사되었습니다.', 'system');
+            } catch (error) {
+                addMessage(`❌ 복사 실패: ${error.message}`, 'error');
+            }
+        });
 
         // Enter 키로 메시지 전송
         messageInput.addEventListener('keydown', (e) => {
