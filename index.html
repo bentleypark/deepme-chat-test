@@ -308,7 +308,7 @@
             padding: 20px;
         }
 
-        .step-badge {
+        /* .step-badge {
             display: inline-block;
             margin-left: 8px;
             padding: 2px 8px;
@@ -322,7 +322,7 @@
 
         .step-badge.hidden {
             display: none;
-        }
+        } */
     </style>
 </head>
 <body>
@@ -356,7 +356,7 @@
     <div id="responseArea" class="response-area empty">
         <div class="response-header">
             <strong class="response-title">실시간 응답</strong>
-            <span id="responseStepBadge" class="step-badge hidden"></span>
+            <!-- <span id="responseStepBadge" class="step-badge hidden"></span> -->
         </div>
         <div class="response-content">여기에 실시간 응답이 표시됩니다...</div>
     </div>
@@ -380,12 +380,12 @@
 <script>
     let ws = null;
     let currentResponse = '';
-    let currentStep = { step: null, step_name: null };
-    let currentResponseStep = { step: null, step_name: null };
+    // let currentStep = { step: null, step_name: null };
+    // let currentResponseStep = { step: null, step_name: null };
     let isResponding = false;
     let lastAssistantHistoryEl = null;
     let lastAssistantHistoryTs = 0;
-    const defaultUserStep = { step: 1, step_name: '인사' };
+    // const defaultUserStep = { step: 1, step_name: '인사' };
 
     const statusEl = document.getElementById('status');
     const sessionInfoEl = document.getElementById('sessionInfo');
@@ -399,7 +399,7 @@
     const messagesEl = document.getElementById('messages');
     const responseAreaEl = document.getElementById('responseArea');
     const responseHistoryEl = document.getElementById('responseHistory');
-    const responseStepBadgeEl = document.getElementById('responseStepBadge');
+    // const responseStepBadgeEl = document.getElementById('responseStepBadge');
     const userIdInput = document.getElementById('userIdInput');
     const messageInput = document.getElementById('messageInput');
     const systemPromptInput = document.getElementById('systemPromptInput');
@@ -453,14 +453,13 @@
 
         const timestamp = new Date().toLocaleString('ko-KR');
         const label = type === 'user' ? '👤 사용자' : '🤖 노아';
-        const hasStep = (stepInfo && (stepInfo.step !== null || stepInfo.step_name)) || (currentStep.step !== null || currentStep.step_name);
-        const effectiveStep = hasStep ? (stepInfo || currentStep) : (type === 'user' ? defaultUserStep : null);
-        const stepLabel = formatStepBadge(effectiveStep);
+        // const hasStep = (stepInfo && (stepInfo.step !== null || stepInfo.step_name)) || (currentStep.step !== null || currentStep.step_name);
+        // const effectiveStep = hasStep ? (stepInfo || currentStep) : (type === 'user' ? defaultUserStep : null);
+        // const stepLabel = formatStepBadge(effectiveStep);
 
         historyItem.innerHTML = `
             <div class="history-header">
                 <span class="timestamp">[${timestamp}] ${label}</span>
-                ${stepLabel}
             </div>
             <div class="content">${text}</div>
         `;
@@ -484,6 +483,7 @@
         responseHistoryEl.textContent = '아직 완료된 응답이 없습니다.';
     }
 
+    /*
     function formatCurrentStep() {
         return formatStepBadge(currentStep);
     }
@@ -531,6 +531,7 @@
             responseStepBadgeEl.textContent = '';
         }
     }
+    */
 
     // 시스템 프롬프트를 서버에서 가져오는 함수
     async function loadSystemPrompt() {
@@ -635,6 +636,7 @@
                     } else if (data.type === 'welcome') {
                         addMessage(`👋 웰컴 메시지: ${data.message}`, 'system');
 
+                    /*
                     } else if (data.type === 'step') {
                         updateCurrentStep(data.step, data.step_name);
                         if (isResponding) {
@@ -643,11 +645,12 @@
                             updateHistoryStepBadge(lastAssistantHistoryEl, currentStep);
                         }
                         addMessage(`🧭 현재 STEP: ${getStepText()}`, 'system');
+                    */
 
                     } else if (data.type === 'message_start') {
                         // 메시지 시작
                         currentResponse = '';
-                        currentResponseStep = { ...currentStep };
+                        // currentResponseStep = { ...currentStep };
                         isResponding = true;
                         clearResponse();
                         addMessage(`📝 AI 응답 시작...`, 'system');
@@ -656,9 +659,9 @@
                         // 실시간 토큰 스트리밍
                         if (!isResponding) {
                             isResponding = true;
-                            if (currentResponseStep.step === null && !currentResponseStep.step_name) {
-                                currentResponseStep = { ...currentStep };
-                            }
+                            // if (currentResponseStep.step === null && !currentResponseStep.step_name) {
+                            //     currentResponseStep = { ...currentStep };
+                            // }
                         }
                         currentResponse += data.delta;
                         updateResponse(currentResponse);
@@ -671,7 +674,7 @@
 
                         // AI 응답을 히스토리에 추가
                         if (currentResponse) {
-                            addToHistory(currentResponse, 'assistant', currentResponseStep);
+                            addToHistory(currentResponse, 'assistant');
                         }
 
                     } else if (data.type === 'error') {
@@ -702,7 +705,7 @@
                 sendBtn.disabled = true;
                 sessionInfoEl.style.display = 'none';
                 clearResponse();
-                updateCurrentStep(null, null);
+                // updateCurrentStep(null, null);
             };
 
         } catch (error) {
@@ -768,7 +771,7 @@
         messagesEl.innerHTML = '';
         clearResponse();
         clearHistory();
-        updateCurrentStep(null, null);
+        // updateCurrentStep(null, null);
         addMessage('로그와 응답 히스토리가 지워졌습니다.', 'system');
     });
 
