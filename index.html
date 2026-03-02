@@ -738,12 +738,12 @@
             step_type: 'normal'
         };
 
-        // 시스템 프롬프트가 있으면 포함
-        const systemPrompt = systemPromptInput.value.trim();
-        if (systemPrompt) {
-            payload.system_prompt = systemPrompt;
-            addMessage('📝 시스템 프롬프트 포함하여 전송', 'system');
-        }
+        // 서버는 클라이언트가 보내는 system_prompt를 사용하지 않음 (서버 자체 파일에서 로드)
+        // const systemPrompt = systemPromptInput.value.trim();
+        // if (systemPrompt) {
+        //     payload.system_prompt = systemPrompt;
+        //     addMessage('📝 시스템 프롬프트 포함하여 전송', 'system');
+        // }
 
         addMessage(`송신: ${JSON.stringify(payload, null, 2)}`, 'sent');
 
