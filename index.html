@@ -410,9 +410,14 @@
     <div id="responseHistory" class="response-history empty">아직 완료된 응답이 없습니다.</div>
 
     <div class="input-group">
-        <label for="systemPromptInput">시스템 프롬프트 (서버에서 자동 로드):</label>
-        <textarea id="systemPromptInput" placeholder="연결 시 서버에서 자동으로 로드됩니다..."></textarea>
-        <button id="savePromptBtn" class="send-btn" style="margin-top: 10px;">프롬프트 저장</button>
+        <label for="systemPromptInput">시스템 프롬프트 (테스트 서버에 저장 · 저장하면 모든 테스터의 다음 메시지부터 적용):</label>
+        <div id="promptSource" style="font-size: 12px; color: #666; margin-bottom: 6px;">아직 불러오지 않았습니다.</div>
+        <textarea id="systemPromptInput" autocomplete="off" placeholder="페이지를 열면 서버에서 자동으로 불러옵니다..."></textarea>
+        <div style="margin-top: 10px;">
+            <button id="loadPromptBtn" class="copy-btn">현재 프롬프트 불러오기</button>
+            <button id="savePromptBtn" class="send-btn">프롬프트 저장</button>
+            <button id="resetPromptBtn" class="clear-btn">기본값으로 되돌리기</button>
+        </div>
     </div>
 
     <h3>로그:</h3>
@@ -439,6 +444,9 @@
     const sendBtn = document.getElementById('sendBtn');
     const clearBtn = document.getElementById('clearBtn');
     const savePromptBtn = document.getElementById('savePromptBtn');
+    const loadPromptBtn = document.getElementById('loadPromptBtn');
+    const resetPromptBtn = document.getElementById('resetPromptBtn');
+    const promptSourceEl = document.getElementById('promptSource');
     const copyHistoryBtn = document.getElementById('copyHistoryBtn');
     const messagesEl = document.getElementById('messages');
     const responseAreaEl = document.getElementById('responseArea');
@@ -865,47 +873,243 @@
     }
     */
 
-    // 시스템 프롬프트를 서버에 저장하는 함수
+    // ===== 시스템 프롬프트 (/prompts API) =====
+    // 테스트 서버에서만 열리는 API로, 저장하면 서버 DB에 이력으로 쌓이고 모든 테스터의 다음 메시지부터(진행 중인 대화 포함) 적용된다.
+    // 운영 서버에서는 404이고, 저장값을 읽지 않는다.
+    const PROMPT_API_URL = `https://${SERVER_HOST}/prompts/system`;
+    const PROMPT_ERROR_TEXT = {
+        content_empty: '프롬프트가 비어 있습니다.',
+        content_too_large: '프롬프트가 너무 깁니다 (최대 50KB).',
+    };
+    // 서버가 잠들어 있으면 깨어날 때까지 요청이 붙잡히므로 워밍업 대기와 같은 시간을 준다.
+    const PROMPT_REQUEST_TIMEOUT_MS = WARMUP_TIMEOUT_MS;
+    const PROMPT_UNCERTAIN_HINT = "서버에는 반영됐을 수 있으니 '현재 프롬프트 불러오기'로 확인하세요.";
+    const promptButtons = [loadPromptBtn, savePromptBtn, resetPromptBtn];
+
+    // 마지막으로 서버와 맞춘 내용. null이면 아직 서버 값을 한 번도 확인하지 못한 상태다.
+    let lastSyncedPrompt = null;
+    let lastSyncedAt = null;
+    // 프롬프트 요청은 한 번에 하나만 보낸다 (자동 불러오기와 버튼 요청이 겹쳐 화면이 엇갈리지 않도록).
+    let promptBusy = false;
+    // 작성 중이라 자동 불러오기를 건너뛴 사실을 로그에 이미 남겼는지 (연결할 때마다 반복하지 않도록)
+    let autoLoadSkipNotified = false;
+
+    // uncertain: PUT/DELETE가 서버에 반영됐는지 알 수 없는 실패 (시간 초과·네트워크/CORS 실패·5xx·응답 형식 이상). GET은 항상 false.
+    class PromptRequestError extends Error {
+        constructor(message, { uncertain = false } = {}) {
+            super(message);
+            this.uncertain = uncertain;
+        }
+    }
+
+    function describeErrorDetail(detail) {
+        if (typeof detail === 'string') return detail;
+        // FastAPI 422 검증 오류는 [{loc, msg, type}] 배열로 온다
+        if (Array.isArray(detail)) {
+            return detail.map((d) => `${(d.loc || []).join('.')}: ${d.msg}`).join('; ');
+        }
+        return '';
+    }
+
+    function isPromptResponse(data) {
+        return Boolean(data) && typeof data.content === 'string' && typeof data.sha256 === 'string';
+    }
+
+    async function requestPrompt(method, body) {
+        const mayHaveApplied = method !== 'GET';
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), PROMPT_REQUEST_TIMEOUT_MS);
+        let response;
+        try {
+            response = await fetch(PROMPT_API_URL, {
+                method,
+                cache: 'no-store',
+                headers: body ? { 'Content-Type': 'application/json' } : undefined,
+                body: body ? JSON.stringify(body) : undefined,
+                signal: controller.signal,
+            });
+        } catch (error) {
+            if (error.name === 'AbortError') {
+                console.error(`[prompt] ${method} 요청 시간 초과`, error);
+                throw new PromptRequestError(
+                    `서버가 ${PROMPT_REQUEST_TIMEOUT_MS / 1000}초 안에 응답하지 않았습니다. 잠시 후 다시 시도하세요.`,
+                    { uncertain: mayHaveApplied },
+                );
+            }
+            // 네트워크 오류·CORS 차단은 물론, CORS 헤더 없이 오는 서버 500도 브라우저에서는 이렇게 보인다.
+            console.error(`[prompt] ${method} 요청 실패`, error);
+            throw new PromptRequestError(
+                `서버에 요청하지 못했습니다 (네트워크 오류 또는 CORS 차단 – 현재 출처 ${location.origin}. 서버 내부 오류(500)도 이렇게 보일 수 있습니다)`,
+                { uncertain: mayHaveApplied },
+            );
+        } finally {
+            clearTimeout(timeout);
+        }
+
+        const data = await response.json().catch((error) => {
+            console.error(`[prompt] ${method} 응답 본문 해석 실패 (HTTP ${response.status})`, error);
+            return null;
+        });
+
+        if (!response.ok) {
+            const detail = describeErrorDetail(data?.detail);
+            if (response.status === 404) {
+                throw new PromptRequestError('프롬프트 API를 찾을 수 없습니다 (404). 테스트 서버에 /prompts가 배포됐는지, 서버가 테스트 서버로 인식되는지 확인하세요.');
+            }
+            if (response.status === 429) {
+                throw new PromptRequestError('요청이 너무 많습니다. 잠시 후 다시 시도하세요 (분당 20회, 테스터 전체가 함께 쓰는 한도일 수 있음).');
+            }
+            if (response.status >= 500) {
+                throw new PromptRequestError(`서버 오류 (HTTP ${response.status}). 서버가 재시작·배포 중일 수 있으니 잠시 후 다시 시도하세요.`, { uncertain: mayHaveApplied });
+            }
+            throw new PromptRequestError(PROMPT_ERROR_TEXT[detail] || `HTTP ${response.status}${detail ? ` (${detail})` : ''}`);
+        }
+
+        if (!isPromptResponse(data)) {
+            console.error(`[prompt] ${method} 응답 형식 오류`, data);
+            throw new PromptRequestError(`서버 응답 형식이 올바르지 않습니다 (HTTP ${response.status}).`, { uncertain: mayHaveApplied });
+        }
+        return data;
+    }
+
+    function describePromptSource(data) {
+        const sha = `SHA256 ${data.sha256.substring(0, 12)}…`;
+        if (data.source === 'db') {
+            const savedAt = data.updated_at ? new Date(data.updated_at) : new Date(NaN);
+            const when = Number.isNaN(savedAt.getTime()) ? '저장 시각 알 수 없음' : `${savedAt.toLocaleString('ko-KR')} 저장`;
+            return `저장된 프롬프트 · ${when} · ${sha}`;
+        }
+        if (data.source === 'file') return `기본 파일 프롬프트 · ${sha}`;
+        return `출처 알 수 없음(${data.source}) · ${sha}`;
+    }
+
+    // 검증을 마친 응답만 받아 입력란·기준값·상태 표시를 한꺼번에 바꾼다.
+    function applyPromptResponse(data) {
+        const sourceText = describePromptSource(data);
+        systemPromptInput.value = data.content;
+        lastSyncedPrompt = data.content;
+        lastSyncedAt = new Date();
+        promptSourceEl.textContent = `현재 적용 중: ${sourceText}`;
+        return sourceText;
+    }
+
+    function hasUnsavedPromptEdit() {
+        // 서버 값을 확인한 적이 없으면 입력란에 쓴 내용은 모두 수정으로 본다
+        return systemPromptInput.value.trim() !== (lastSyncedPrompt ?? '').trim();
+    }
+
+    function lastSyncedNote() {
+        if (hasUnsavedPromptEdit()) return ' · 입력란에는 저장하지 않은 수정 내용이 남아 있습니다';
+        return lastSyncedAt
+            ? ` · 입력란은 ${lastSyncedAt.toLocaleTimeString('ko-KR')}에 마지막으로 확인한 값입니다`
+            : '';
+    }
+
+    // 다른 요청이 진행 중이면 실행하지 않고 false를 돌려준다.
+    async function runPromptAction(activeBtn, busyText, action) {
+        if (promptBusy) return false;
+        promptBusy = true;
+        const originalText = activeBtn.textContent;
+        promptButtons.forEach((btn) => { btn.disabled = true; });
+        // 응답이 오면 입력란을 서버 값으로 바꾸므로, 그사이 입력한 내용이 사라지지 않게 막아 둔다
+        systemPromptInput.readOnly = true;
+        activeBtn.textContent = busyText;
+        try {
+            await action();
+        } finally {
+            promptBusy = false;
+            promptButtons.forEach((btn) => { btn.disabled = false; });
+            systemPromptInput.readOnly = false;
+            activeBtn.textContent = originalText;
+        }
+        return true;
+    }
+
+    function reportUncertainFailure(label, error) {
+        addMessage(`❌ ${label} 실패: ${error.message} ${PROMPT_UNCERTAIN_HINT}`, 'error');
+        promptSourceEl.textContent = `⚠️ ${label} 결과를 알 수 없습니다 – '현재 프롬프트 불러오기'로 확인하세요.`;
+    }
+
+    async function loadSystemPrompt({ confirmOverwrite = true } = {}) {
+        if (confirmOverwrite && hasUnsavedPromptEdit()
+            && !confirm('저장하지 않은 수정 내용이 있습니다. 서버의 현재 프롬프트로 덮어쓸까요?')) {
+            return;
+        }
+        await runPromptAction(loadPromptBtn, '불러오는 중...', async () => {
+            try {
+                const sourceText = applyPromptResponse(await requestPrompt('GET'));
+                addMessage(`📥 시스템 프롬프트를 불러왔습니다 · ${sourceText}`, 'system');
+            } catch (error) {
+                promptSourceEl.textContent = `불러오기 실패: ${error.message}${lastSyncedNote()}`;
+                addMessage(`❌ 시스템 프롬프트 불러오기 실패: ${error.message}`, 'error');
+            }
+        });
+    }
+
+    // 워밍업이 'warm'으로 끝났을 때(페이지 로드 직후, 연결 버튼 처리 중) 아직 서버 값을 확인하지 못했으면 한 번 불러온다.
+    // 입력란에 작성 중인 내용이 있으면 덮어쓰지 않고 안내만 한다.
+    function autoLoadSystemPrompt() {
+        if (lastSyncedPrompt !== null || promptBusy) return;
+        if (hasUnsavedPromptEdit()) {
+            promptSourceEl.textContent = "입력란에 작성 중인 내용이 있어 자동으로 불러오지 않았습니다. '현재 프롬프트 불러오기'로 서버 값을 확인하세요.";
+            if (!autoLoadSkipNotified) {
+                addMessage('ℹ️ 작성 중인 프롬프트가 있어 서버 프롬프트를 자동으로 불러오지 않았습니다.', 'system');
+                autoLoadSkipNotified = true;
+            }
+            return;
+        }
+        loadSystemPrompt({ confirmOverwrite: false });
+    }
+
     async function saveSystemPrompt() {
         const content = systemPromptInput.value.trim();
-
         if (!content) {
             addMessage('⚠️ 시스템 프롬프트가 비어있습니다. 내용을 입력해주세요.', 'error');
             return;
         }
-
-        try {
-            addMessage('💾 시스템 프롬프트를 서버에 저장하는 중...', 'system');
-            savePromptBtn.disabled = true;
-            savePromptBtn.textContent = '저장 중...';
-
-            const response = await fetch('https://deep-me-test-server.onrender.com/prompts/system', {
-                method: 'PUT',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({ content })
-            });
-
-            if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
-            }
-
-            const data = await response.json();
-
-            addMessage('✅ 시스템 프롬프트 저장 완료!', 'system');
-            addMessage(`📋 새로운 SHA256: ${data.sha256?.substring(0, 16)}...`, 'system');
-            addMessage(`🕒 업데이트 시간: ${new Date(data.updated_at).toLocaleString('ko-KR')}`, 'system');
-
-            // 저장 성공 후 textarea에 최신 내용 반영
-            systemPromptInput.value = data.content;
-
-        } catch (error) {
-            addMessage(`❌ 시스템 프롬프트 저장 실패: ${error.message}`, 'error');
-        } finally {
-            savePromptBtn.disabled = false;
-            savePromptBtn.textContent = '프롬프트 저장';
+        if (lastSyncedPrompt === null
+            && !confirm('서버의 현재 프롬프트를 아직 확인하지 않았습니다. 다른 테스터가 저장한 프롬프트를 덮어쓸 수 있습니다. 그래도 저장할까요?')) {
+            return;
         }
+        // 바뀐 내용 없이 저장하면 같은 내용의 저장값이 하나 더 생긴다. 서버는 저장값을 기본 파일보다 우선하므로,
+        // 기본 파일이 적용된 상태에서 이렇게 저장하면 이후 파일을 고쳐 배포해도 테스트 서버에 반영되지 않는다.
+        if (lastSyncedPrompt !== null && !hasUnsavedPromptEdit()
+            && !confirm('서버에 적용 중인 프롬프트와 내용이 같습니다. 그래도 저장할까요?')) {
+            return;
+        }
+        await runPromptAction(savePromptBtn, '저장 중...', async () => {
+            try {
+                addMessage('💾 시스템 프롬프트를 서버에 저장하는 중...', 'system');
+                const data = await requestPrompt('PUT', { content });
+                applyPromptResponse(data);
+                addMessage(`✅ 시스템 프롬프트 저장 완료 (SHA256 ${data.sha256.substring(0, 16)}…). 모든 테스터의 다음 메시지부터 적용됩니다 (진행 중인 대화 포함).`, 'system');
+            } catch (error) {
+                if (error.uncertain) {
+                    reportUncertainFailure('시스템 프롬프트 저장', error);
+                } else {
+                    addMessage(`❌ 시스템 프롬프트 저장 실패: ${error.message}`, 'error');
+                }
+            }
+        });
+    }
+
+    async function resetSystemPrompt() {
+        const draftWarning = hasUnsavedPromptEdit() ? '\n입력란의 저장하지 않은 수정 내용도 사라집니다.' : '';
+        if (!confirm(`저장된 프롬프트 적용을 해제하고 기본 파일 프롬프트로 되돌릴까요? (저장 이력은 서버에 남습니다)\n모든 테스터에게 적용됩니다.${draftWarning}`)) {
+            return;
+        }
+        await runPromptAction(resetPromptBtn, '되돌리는 중...', async () => {
+            try {
+                applyPromptResponse(await requestPrompt('DELETE'));
+                addMessage('↩️ 저장된 프롬프트 적용을 해제하고 기본 파일 프롬프트로 되돌렸습니다. 모든 테스터의 다음 메시지부터 적용됩니다 (진행 중인 대화 포함).', 'system');
+            } catch (error) {
+                if (error.uncertain) {
+                    reportUncertainFailure('기본값 되돌리기', error);
+                } else {
+                    addMessage(`❌ 기본값 되돌리기 실패: ${error.message}`, 'error');
+                }
+            }
+        });
     }
 
     connectBtn.addEventListener('click', () => {
@@ -942,6 +1146,8 @@
             finishConnecting();
             return;
         }
+        // 아직 서버 프롬프트를 받지 못했으면(첫 워밍업·첫 불러오기 실패 등) 서버가 깨어난 지금 다시 시도한다 (프롬프트 API는 로그인과 무관)
+        autoLoadSystemPrompt();
 
         // 대기하는 동안 로그아웃했거나 토큰이 만료됐을 수 있다
         if (!hasValidAuth()) {
@@ -1123,7 +1329,7 @@
             step_type: 'normal'
         };
 
-        // 서버는 클라이언트가 보내는 system_prompt를 사용하지 않음 (서버 자체 파일에서 로드)
+        // 서버는 클라이언트가 보내는 system_prompt를 사용하지 않음 (/prompts로 저장된 값, 없으면 서버의 기본 파일에서 로드)
         // const systemPrompt = systemPromptInput.value.trim();
         // if (systemPrompt) {
         //     payload.system_prompt = systemPrompt;
@@ -1160,7 +1366,9 @@
         addMessage('로그와 응답 히스토리가 지워졌습니다.', 'system');
     });
 
+    loadPromptBtn.addEventListener('click', () => loadSystemPrompt());
     savePromptBtn.addEventListener('click', saveSystemPrompt);
+    resetPromptBtn.addEventListener('click', resetSystemPrompt);
 
     // 전체 히스토리 복사 기능
     copyHistoryBtn.addEventListener('click', async () => {
@@ -1212,8 +1420,21 @@
     addMessage('1. "연결" 버튼을 클릭하세요.', 'system');
     addMessage('2. 연결 후 메시지를 입력하고 Enter로 전송하세요.', 'system');
 
-    // 페이지를 열자마자 서버를 미리 깨운다 (연결 버튼은 이 대기를 공유한다)
-    warmUpServer();
+    // 새로고침·탭 복원 때 브라우저가 이전 입력값을 되살리면 "작성 중"으로 오인해 서버 프롬프트를
+    // 불러오지 않으므로, 시작할 때 비워 둔다 (autocomplete="off"로 막지 못하는 브라우저 대비)
+    systemPromptInput.value = '';
+
+    // 페이지를 열자마자 서버를 미리 깨운다 (연결 버튼은 이 대기를 공유한다). 깨어나면 현재 프롬프트를 불러온다.
+    warmUpServer().then((outcome) => {
+        if (outcome === 'warm') {
+            autoLoadSystemPrompt();
+        } else if (lastSyncedPrompt === null) {
+            const reason = outcome === 'booting'
+                ? '서버가 응답하지 않아'
+                : '서버에 요청하지 못해 (네트워크·차단 확장 프로그램 확인)';
+            promptSourceEl.textContent = `${reason} 프롬프트를 불러오지 못했습니다. '현재 프롬프트 불러오기'를 누르거나 '연결'(로그인 후)을 누르면 다시 시도합니다.`;
+        }
+    });
 
     // CSS 애니메이션 추가
     const style = document.createElement('style');
